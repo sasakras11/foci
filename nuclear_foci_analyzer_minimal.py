@@ -24,6 +24,7 @@ from skimage.segmentation import watershed
 from skimage.color import label2rgb
 from skimage.measure import regionprops
 from scipy import ndimage as ndi
+from skimage.draw import circle_perimeter as draw_circle_perimeter
 
 class AnalysisWorker(QThread):
     """Worker thread for image analysis to keep the UI responsive"""
@@ -210,6 +211,23 @@ class AnalysisWorker(QThread):
             if self.image_path and os.path.splitext(self.image_path)[1].lower() in ['.jpg', '.jpeg']:
                 normalized = filters.gaussian(normalized, sigma=0.5)
             
+            # Create a mask to ignore white areas
+            # Use all channels to identify white regions (letters, scale bars, etc.)
+            r_channel = self.image[:, :, 0].astype(float) / 255.0 if self.image[:, :, 0].dtype == np.uint8 else self.image[:, :, 0]
+            g_channel = self.image[:, :, 1].astype(float) / 255.0 if self.image[:, :, 1].dtype == np.uint8 else self.image[:, :, 1]
+            b_channel = self.image[:, :, 2].astype(float) / 255.0 if self.image[:, :, 2].dtype == np.uint8 else self.image[:, :, 2]
+            
+            # White areas have high values in all channels
+            white_mask = (r_channel > 0.8) & (g_channel > 0.8) & (b_channel > 0.8)
+            
+            # Also filter out areas that are not predominantly green
+            # Green areas should have higher green channel values compared to red and blue
+            green_dominant = (g_channel > r_channel * 1.2) & (g_channel > b_channel * 1.2)
+            
+            # Apply masks - exclude white areas and focus on predominantly green areas
+            valid_area_mask = ~white_mask
+            normalized = normalized * valid_area_mask
+            
             # Use LoG blob detection with more robust parameters
             blobs = feature.blob_log(
                 normalized,
@@ -225,7 +243,11 @@ class AnalysisWorker(QThread):
             valid_blobs = []
             for blob in blobs:
                 y, x, r = blob
-                if 0 <= int(y) < height and 0 <= int(x) < width:
+                y_int, x_int = int(y), int(x)
+                
+                # Only include if in bounds and not in a white area
+                if (0 <= y_int < height and 0 <= x_int < width and 
+                    not white_mask[y_int, x_int]):
                     valid_blobs.append(blob)
             
             if valid_blobs:
@@ -296,8 +318,30 @@ class MinimalFociAnalyzer(QMainWindow):
         central_widget = QWidget()
         self.setCentralWidget(central_widget)
         
-        # Create main layout
-        main_layout = QVBoxLayout(central_widget)
+        # Create main layout as horizontal layout
+        main_layout = QHBoxLayout(central_widget)
+        
+        # Left panel for image display
+        left_panel = QWidget()
+        left_layout = QVBoxLayout(left_panel)
+        
+        # Create image display area
+        self.image_label = QLabel()
+        self.image_label.setAlignment(Qt.AlignCenter)
+        self.image_label.setMinimumSize(600, 500)
+        self.image_label.setFrameShape(QFrame.Box)
+        self.image_label.setText("Image will appear here")
+        left_layout.addWidget(self.image_label)
+        
+        # Status label under the image
+        self.status_label = QLabel("Load an image to begin")
+        left_layout.addWidget(self.status_label)
+        
+        main_layout.addWidget(left_panel, 7)  # Image takes 70% of width
+        
+        # Right panel for controls and results
+        right_panel = QWidget()
+        right_layout = QVBoxLayout(right_panel)
         
         # File operations
         file_group = QGroupBox("File Operations")
@@ -305,7 +349,7 @@ class MinimalFociAnalyzer(QMainWindow):
         self.load_button = QPushButton("Load Image")
         self.load_button.clicked.connect(self.load_image)
         file_layout.addWidget(self.load_button)
-        main_layout.addWidget(file_group)
+        right_layout.addWidget(file_group)
         
         # Channel selection
         channel_group = QGroupBox("Channel Selection")
@@ -315,7 +359,36 @@ class MinimalFociAnalyzer(QMainWindow):
         self.nucleus_channel_combo.addItems(["red", "green", "blue"])
         self.nucleus_channel_combo.setCurrentText("blue")
         channel_layout.addWidget(self.nucleus_channel_combo)
-        main_layout.addWidget(channel_group)
+        right_layout.addWidget(channel_group)
+        
+        # Detection parameters
+        param_group = QGroupBox("Detection Settings")
+        param_layout = QVBoxLayout(param_group)
+        
+        # Foci detection sensitivity
+        param_layout.addWidget(QLabel("Foci Detection Sensitivity:"))
+        self.sensitivity_label = QLabel("0.1")
+        sensitivity_layout = QHBoxLayout()
+        
+        self.sensitivity_slider = QSlider(Qt.Horizontal)
+        self.sensitivity_slider.setMinimum(1)
+        self.sensitivity_slider.setMaximum(50)
+        self.sensitivity_slider.setValue(10)  # Default 0.1
+        self.sensitivity_slider.setTickPosition(QSlider.TicksBelow)
+        self.sensitivity_slider.setTickInterval(5)
+        self.sensitivity_slider.valueChanged.connect(self.update_sensitivity_label)
+        
+        sensitivity_layout.addWidget(self.sensitivity_slider)
+        sensitivity_layout.addWidget(self.sensitivity_label)
+        param_layout.addLayout(sensitivity_layout)
+        
+        # Add a "Reanalyze with current settings" button
+        self.reanalyze_button = QPushButton("Reanalyze Current Image")
+        self.reanalyze_button.clicked.connect(self.run_analysis)
+        self.reanalyze_button.setEnabled(False)
+        param_layout.addWidget(self.reanalyze_button)
+        
+        right_layout.addWidget(param_group)
         
         # Analysis button
         analysis_group = QGroupBox("Analysis")
@@ -323,7 +396,7 @@ class MinimalFociAnalyzer(QMainWindow):
         self.run_button = QPushButton("Count Foci")
         self.run_button.clicked.connect(self.run_analysis)
         analysis_layout.addWidget(self.run_button)
-        main_layout.addWidget(analysis_group)
+        right_layout.addWidget(analysis_group)
         
         # Results section
         results_group = QGroupBox("Results")
@@ -348,11 +421,13 @@ class MinimalFociAnalyzer(QMainWindow):
         self.export_button.setEnabled(False)
         results_layout.addWidget(self.export_button)
         
-        main_layout.addWidget(results_group)
+        right_layout.addWidget(results_group)
         
-        # Status label
-        self.status_label = QLabel("Load an image to begin")
-        main_layout.addWidget(self.status_label)
+        # Add right panel to main layout
+        main_layout.addWidget(right_panel, 3)  # Controls take 30% of width
+        
+        # Adjust window size to fit 16:10 aspect ratio better
+        self.setGeometry(100, 100, 1000, 625)  # 16:10 aspect ratio
     
     def load_image(self):
         """Load an image file"""
@@ -384,11 +459,17 @@ class MinimalFociAnalyzer(QMainWindow):
                         expanded[:, :, i] = self.original_image[:, :, channels-1]  # Duplicate last channel
                     self.original_image = expanded
             
+            # Display the loaded image
+            self.display_image(self.original_image)
+            
             # Reset results
             self.nuclei_count_label.setText("0")
             self.foci_count_label.setText("0")
             self.avg_foci_label.setText("0")
             self.export_button.setEnabled(False)
+            
+            # Enable reanalyze button if an image is loaded
+            self.reanalyze_button.setEnabled(True)
             
             self.status_label.setText(f"Loaded: {os.path.basename(file_path)}")
             
@@ -397,11 +478,66 @@ class MinimalFociAnalyzer(QMainWindow):
             import traceback
             traceback.print_exc()
     
+    def display_image(self, image, foci=None, nuclei_mask=None):
+        """Display image with optional foci markers and nuclei outlines"""
+        if image is None:
+            return
+            
+        # Create a copy for visualization
+        display_img = image.copy()
+        
+        if isinstance(display_img[0,0,0], np.float64):
+            display_img = (display_img * 255).astype(np.uint8)
+            
+        # Draw nuclei boundaries if available
+        if nuclei_mask is not None:
+            # Create a binary edge image of the segmentation
+            edges = segmentation.find_boundaries(nuclei_mask, mode='outer')
+            # Apply nuclei boundaries in cyan
+            display_img[edges, 0] = 0  # Red channel
+            display_img[edges, 1] = 255  # Green channel
+            display_img[edges, 2] = 255  # Blue channel
+        
+        # Draw foci if available
+        if foci is not None and len(foci) > 0:
+            # Draw red circles around detected foci
+            for blob in foci:
+                y, x, r = blob
+                y_int, x_int = int(y), int(x)
+                radius = int(r)
+                
+                # Only draw if in bounds
+                if 0 <= x_int < display_img.shape[1] and 0 <= y_int < display_img.shape[0]:
+                    # Draw circle
+                    rr, cc = draw_circle_perimeter(y_int, x_int, max(1, radius), shape=display_img.shape[:2])
+                    display_img[rr, cc, 0] = 255  # Red channel
+                    display_img[rr, cc, 1] = 0    # Green channel
+                    display_img[rr, cc, 2] = 0    # Blue channel
+        
+        # Convert NumPy array to QImage for display
+        height, width, channels = display_img.shape
+        bytesPerLine = channels * width
+        qImg = QImage(display_img.data, width, height, bytesPerLine, QImage.Format_RGB888)
+        
+        # Create a pixmap and set it to the label
+        pixmap = QPixmap.fromImage(qImg)
+        
+        # Scale the pixmap to fit the label while preserving aspect ratio
+        self.image_label.setPixmap(pixmap.scaled(
+            self.image_label.width(), 
+            self.image_label.height(),
+            Qt.KeepAspectRatio,
+            Qt.SmoothTransformation
+        ))
+    
     def run_analysis(self):
         """Run the analysis to count foci"""
         if self.original_image is None:
             QMessageBox.warning(self, "Warning", "No image loaded")
             return
+        
+        # Get detection sensitivity from slider
+        detection_threshold = self.sensitivity_slider.value() / 100.0
         
         # Use default parameters that work well for most images
         params = {
@@ -410,7 +546,7 @@ class MinimalFociAnalyzer(QMainWindow):
             'sensitivity': 0.5,
             'min_sigma': 2.0,
             'max_sigma': 10.0,
-            'detection_threshold': 0.1
+            'detection_threshold': detection_threshold  # Use value from slider
         }
         
         # Get selected nucleus channel
@@ -446,6 +582,36 @@ class MinimalFociAnalyzer(QMainWindow):
         self.nuclei_count_label.setText(str(results['num_nuclei']))
         self.foci_count_label.setText(str(results['total_foci']))
         self.avg_foci_label.setText(f"{results['avg_foci']:.2f}")
+        
+        # Create a visualization of the results
+        if hasattr(self.worker, 'image') and hasattr(self.worker, 'params'):
+            # Get detected foci
+            green_channel = self.worker.image[:, :, 1]
+            foci = self.worker.detect_foci(
+                green_channel, 
+                self.worker.params['min_sigma'], 
+                self.worker.params['max_sigma'], 
+                self.worker.params['detection_threshold']
+            )
+            
+            # Get nucleus mask
+            nucleus_channel_name = self.nucleus_channel_combo.currentText()
+            if nucleus_channel_name == "red":
+                nucleus_channel = self.worker.image[:, :, 0]
+            elif nucleus_channel_name == "green":
+                nucleus_channel = self.worker.image[:, :, 1]
+            else:  # Default to blue
+                nucleus_channel = self.worker.image[:, :, 2]
+                
+            nuclei_mask = self.worker.segment_nuclei(
+                nucleus_channel,
+                self.worker.params['threshold'],
+                self.worker.params['min_size'],
+                self.worker.params['sensitivity']
+            )
+            
+            # Display the results
+            self.display_image(self.original_image, foci, nuclei_mask)
         
         # Enable export button
         self.export_button.setEnabled(True)
@@ -507,6 +673,13 @@ class MinimalFociAnalyzer(QMainWindow):
         self.load_button.setEnabled(enabled)
         self.run_button.setEnabled(enabled)
         self.nucleus_channel_combo.setEnabled(enabled)
+        self.sensitivity_slider.setEnabled(enabled)
+        self.reanalyze_button.setEnabled(enabled and self.original_image is not None)
+    
+    def update_sensitivity_label(self):
+        """Update the sensitivity label when slider is moved"""
+        value = self.sensitivity_slider.value() / 100.0
+        self.sensitivity_label.setText(f"{value:.2f}")
 
 # Main entry point
 if __name__ == "__main__":
