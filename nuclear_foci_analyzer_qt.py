@@ -42,11 +42,12 @@ class AnalysisWorker(QThread):
     progress = pyqtSignal(str)
     error = pyqtSignal(str)
     
-    def __init__(self, image, nucleus_channel, params):
+    def __init__(self, image, nucleus_channel, params, image_path=None):
         super().__init__()
         self.image = image
         self.nucleus_channel = nucleus_channel
         self.params = params
+        self.image_path = image_path
         self.results = None
     
     def run(self):
@@ -111,55 +112,97 @@ class AnalysisWorker(QThread):
     def segment_nuclei(self, nucleus_channel, threshold=0, min_size=500, sensitivity=0.5):
         """Segment nuclei from the selected channel"""
         try:
+            print("Starting nucleus segmentation...")
+            
+            # Make sure nucleus_channel is float between 0 and 1 for processing
+            if nucleus_channel.dtype == np.uint8:
+                nucleus_channel = nucleus_channel.astype(float) / 255.0
+                
             # Preprocess: Gaussian blur
             blurred = filters.gaussian(nucleus_channel, sigma=1.0)
+            print("Applied Gaussian blur")
             
             # Enhance contrast using CLAHE
             clahe = exposure.equalize_adapthist(blurred)
+            print("Applied CLAHE")
             
             # Thresholding
             if threshold == 0:  # Auto threshold with Otsu
                 thresh = filters.threshold_otsu(clahe)
                 binary = clahe > thresh
+                print(f"Applied Otsu thresholding with value {thresh:.4f}")
             else:
                 # Manual threshold (normalize threshold to 0-1)
                 binary = clahe > (threshold / 255.0)
+                print(f"Applied manual thresholding with value {threshold/255.0:.4f}")
             
             # Clean up small objects
             cleaned = segmentation.clear_border(binary)
+            print("Cleared border objects")
             
             # Close gaps
             selem = disk(3)
             closed = closing(cleaned, selem)
+            print("Applied morphological closing")
             
             # Distance transform for watershed
             distance = ndi.distance_transform_edt(closed)
+            print("Calculated distance transform")
             
-            # Find local maxima - only use the distance and min_distance parameters
-            # to avoid incompatible parameters across scikit-image versions
-            local_max = feature.peak_local_max(
-                distance, 
-                min_distance=int(20 * sensitivity)
-            )
-            
-            # Convert peak_local_max output to binary mask
-            local_max_mask = np.zeros_like(distance, dtype=bool)
-            for coordinates in local_max:
-                local_max_mask[coordinates[0], coordinates[1]] = True
+            # Find local maxima using a version-compatible approach
+            print(f"Finding local maxima with min_distance={int(20 * sensitivity)}")
+            try:
+                # Try the newer scikit-image API with indices=False
+                local_max = feature.peak_local_max(
+                    distance, 
+                    min_distance=int(20 * sensitivity),
+                    indices=False
+                )
+                print("Used peak_local_max with indices=False")
+            except TypeError:
+                try:
+                    # Older scikit-image API - create a binary mask from coordinates
+                    coordinates = feature.peak_local_max(
+                        distance, 
+                        min_distance=int(20 * sensitivity)
+                    )
+                    local_max = np.zeros_like(distance, dtype=bool)
+                    for coord in coordinates:
+                        local_max[coord[0], coord[1]] = True
+                    print("Used peak_local_max with coordinate conversion")
+                except Exception as e:
+                    # As a last resort, try the simplest approach
+                    coordinates = feature.peak_local_max(
+                        distance, 
+                        min_distance=int(20 * sensitivity)
+                    )
+                    local_max = np.zeros_like(distance, dtype=bool)
+                    for i in range(len(coordinates)):
+                        y, x = coordinates[i]
+                        local_max[y, x] = True
+                    print("Used fallback peak_local_max approach")
             
             # Watershed segmentation
-            markers = measure.label(local_max_mask)
+            markers = measure.label(local_max)
             labels = watershed(-distance, markers, mask=closed)
+            print(f"Applied watershed segmentation, found {np.max(labels)} initial regions")
             
             # Remove small objects
+            filtered_labels = np.zeros_like(labels)
+            num_kept = 0
             for region in regionprops(labels):
-                if region.area < min_size:
-                    labels[labels == region.label] = 0
+                if region.area >= min_size:
+                    filtered_labels[labels == region.label] = num_kept + 1
+                    num_kept += 1
             
-            # Re-label to ensure consecutive labels
-            labels = measure.label(labels > 0)
+            print(f"Removed small objects, kept {num_kept} regions of size >= {min_size}")
             
-            return labels
+            # If no objects are left after filtering, return the original labels
+            if num_kept == 0:
+                print("No regions large enough! Using original labels")
+                filtered_labels = labels
+            
+            return filtered_labels
             
         except Exception as e:
             self.error.emit(f"Nucleus segmentation failed: {str(e)}")
@@ -170,28 +213,62 @@ class AnalysisWorker(QThread):
     def detect_foci(self, green_channel, min_sigma=2.0, max_sigma=10.0, threshold=0.1):
         """Detect foci in the green channel"""
         try:
+            print("Starting foci detection...")
+            
+            # Ensure green channel is float between 0-1
+            if green_channel.dtype == np.uint8:
+                green_channel = green_channel.astype(float) / 255.0
+            
+            print(f"Green channel: min={green_channel.min():.4f}, max={green_channel.max():.4f}, mean={green_channel.mean():.4f}")
+            
             # Preprocess: Background subtraction
             # Use a large-radius gaussian blur as background estimate
             background = filters.gaussian(green_channel, sigma=50)
             bg_subtracted = green_channel - background
             bg_subtracted[bg_subtracted < 0] = 0  # Clip negative values
+            print("Subtracted background")
             
             # Normalize
             normalized = exposure.rescale_intensity(bg_subtracted)
+            print(f"Normalized: min={normalized.min():.4f}, max={normalized.max():.4f}, mean={normalized.mean():.4f}")
             
-            # Use LoG blob detection
+            # JPEG images often need denoising
+            if os.path.splitext(self.image_path)[1].lower() in ['.jpg', '.jpeg']:
+                print("Applying additional denoising for JPEG image")
+                normalized = filters.gaussian(normalized, sigma=0.5)
+            
+            # Use LoG blob detection with more robust parameters
             blobs = feature.blob_log(
                 normalized,
                 min_sigma=min_sigma,
                 max_sigma=max_sigma,
                 num_sigma=10,
-                threshold=threshold
+                threshold=threshold,
+                exclude_border=False
             )
+            
+            print(f"Detected {len(blobs)} foci")
+            
+            # Filter out blobs with invalid coordinates
+            height, width = green_channel.shape
+            valid_blobs = []
+            for blob in blobs:
+                y, x, r = blob
+                if 0 <= int(y) < height and 0 <= int(x) < width:
+                    valid_blobs.append(blob)
+                else:
+                    print(f"Rejected blob at ({x}, {y}) - outside image boundaries")
+            
+            if len(valid_blobs) < len(blobs):
+                print(f"Filtered out {len(blobs) - len(valid_blobs)} invalid blobs")
+                blobs = np.array(valid_blobs)
             
             return blobs
             
         except Exception as e:
             self.error.emit(f"Foci detection failed: {str(e)}")
+            import traceback
+            traceback.print_exc()
             return None
     
     def assign_foci_to_nuclei(self, nuclei_mask, foci_coordinates, green_channel):
@@ -503,15 +580,22 @@ class NuclearFociAnalyzerQt(QMainWindow):
         
         try:
             self.image_path = file_path
+            # Use scikit-image's io.imread for better format handling
             self.original_image = io.imread(file_path)
+            
+            # Print image info for debugging
+            print(f"Image loaded: shape={self.original_image.shape}, dtype={self.original_image.dtype}")
             
             # Handle different image formats
             if len(self.original_image.shape) == 2:  # Grayscale
+                print("Converting grayscale to RGB")
                 self.original_image = np.stack([self.original_image] * 3, axis=-1)
             elif len(self.original_image.shape) == 3:
                 if self.original_image.shape[2] > 3:  # More than RGB
+                    print(f"Image has {self.original_image.shape[2]} channels, truncating to RGB")
                     self.original_image = self.original_image[:, :, :3]  # Take first three channels
                 elif self.original_image.shape[2] < 3:  # Less than RGB
+                    print(f"Image has only {self.original_image.shape[2]} channels, expanding to RGB")
                     # Expand to 3 channels
                     channels = self.original_image.shape[2]
                     expanded = np.zeros((*self.original_image.shape[:2], 3), dtype=self.original_image.dtype)
@@ -520,6 +604,11 @@ class NuclearFociAnalyzerQt(QMainWindow):
                     for i in range(channels, 3):
                         expanded[:, :, i] = self.original_image[:, :, channels-1]  # Duplicate last channel
                     self.original_image = expanded
+            
+            # Ensure image is normalized correctly for display
+            if self.original_image.dtype != np.uint8:
+                print(f"Converting image from {self.original_image.dtype} to uint8")
+                self.original_image = (exposure.rescale_intensity(self.original_image, out_range=(0, 255))).astype(np.uint8)
             
             # Display the original image
             self.display_image(self.original_image)
@@ -578,7 +667,7 @@ class NuclearFociAnalyzerQt(QMainWindow):
         self.status_label.setText("Running analysis...")
         
         # Create worker thread
-        self.worker = AnalysisWorker(self.original_image, nucleus_channel, params)
+        self.worker = AnalysisWorker(self.original_image, nucleus_channel, params, self.image_path)
         self.worker.progress.connect(self.update_status)
         self.worker.error.connect(self.show_error)
         self.worker.finished.connect(self.process_results)
