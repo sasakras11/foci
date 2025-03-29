@@ -179,7 +179,8 @@ def calculate_statistics(nuclei_data):
     
     # Calculate standard deviation of foci per nucleus
     foci_counts = [n['foci_count'] for n in nuclei_data]
-    stddev_foci = np.std(foci_counts) if foci_counts else 0
+    stddev_foci = np.std(foci_counts) if foci_counts else 0 
+    
     
     return {
         'total_nuclei': total_nuclei,
