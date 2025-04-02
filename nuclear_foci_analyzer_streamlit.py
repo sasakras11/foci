@@ -371,6 +371,9 @@ def main():
                 st.session_state.nuclei_mask = None
                 st.session_state.foci = None
                 
+                # Add debug information
+                st.write(f"Debug - Image loaded: shape={image.shape}, type={image.dtype}")
+                
                 # Force a rerun to update the image display
                 st.rerun()
                 
@@ -399,8 +402,13 @@ def main():
         )
         
         # Analysis button
-        if st.button("Count Foci", key="analyze"):
+        clicked = st.button("Count Foci", key="analyze")
+        st.write(f"Debug - Button clicked: {clicked}")
+        
+        if clicked:
+            st.write("Debug - Button handler executing")
             if st.session_state.image is not None:
+                st.write(f"Debug - Image exists: {st.session_state.image.shape}")
                 with st.spinner("Running analysis..."):
                     try:
                         # Use default parameters that work well for most images
@@ -479,9 +487,27 @@ def main():
                         st.session_state.nuclei_mask = nuclei_mask
                         st.session_state.foci = foci
                         
-                        # Clear progress text and force a rerun to update display
+                        # Clear progress text
                         progress_text.empty()
-                        st.rerun()
+                        
+                        # Display results directly without rerun
+                        st.success("Analysis complete!")
+                        
+                        # Create and display visualization
+                        visualization = create_visualization(
+                            st.session_state.image,
+                            foci,
+                            nuclei_mask
+                        )
+                        st.image(visualization, caption="Analysis Results", use_container_width=True)
+                        
+                        # Show metrics
+                        col1_results, col2_results = st.columns(2)
+                        with col1_results:
+                            st.metric("Number of Nuclei", num_nuclei)
+                            st.metric("Total Foci", total_foci)
+                        with col2_results:
+                            st.metric("Avg Foci per Nucleus", f"{avg_foci:.2f}")
                         
                     except Exception as e:
                         st.error(f"Analysis error: {str(e)}")
