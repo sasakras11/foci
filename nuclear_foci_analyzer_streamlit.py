@@ -320,10 +320,10 @@ def main():
                     st.session_state.foci,
                     st.session_state.nuclei_mask
                 )
-                st.image(visualization, caption="Analysis Results", use_column_width=True)
+                st.image(visualization, caption="Analysis Results", use_container_width=True)
             else:
                 # Show original image
-                st.image(st.session_state.image, caption=st.session_state.original_file_name, use_column_width=True)
+                st.image(st.session_state.image, caption=st.session_state.original_file_name, use_container_width=True)
         else:
             # Placeholder when no image is loaded
             st.info("Please upload an image to begin")
@@ -372,7 +372,7 @@ def main():
                 st.session_state.foci = None
                 
                 # Force a rerun to update the image display
-                st.experimental_rerun()
+                st.rerun()
                 
             except Exception as e:
                 st.error(f"Failed to load image: {str(e)}")
@@ -399,7 +399,7 @@ def main():
         )
         
         # Analysis button
-        if st.button("Count Foci", key="analyze", disabled=st.session_state.image is None):
+        if st.button("Count Foci", key="analyze"):
             if st.session_state.image is not None:
                 with st.spinner("Running analysis..."):
                     try:
@@ -481,7 +481,7 @@ def main():
                         
                         # Clear progress text and force a rerun to update display
                         progress_text.empty()
-                        st.experimental_rerun()
+                        st.rerun()
                         
                     except Exception as e:
                         st.error(f"Analysis error: {str(e)}")
