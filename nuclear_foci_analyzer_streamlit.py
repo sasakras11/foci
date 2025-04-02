@@ -215,7 +215,6 @@ def assign_foci_to_nuclei(nuclei_mask, foci_coordinates, green_channel):
     if nuclei_mask is None or foci_coordinates is None or len(foci_coordinates) == 0:
         return None
     
-    nuclei_props = regionprops(nuclei_mask)
     nuclei_data = []
     
     # Initialize data for each nucleus
@@ -297,55 +296,97 @@ def main():
     st.title("Nuclear Foci Analyzer")
     st.write("Upload an image to analyze and count green foci within cell nuclei.")
     
-    # Create a two-column layout
+    # Initialize session state for storing analysis results
+    if 'results' not in st.session_state:
+        st.session_state.results = None
+        
+    # Create layout
     col1, col2 = st.columns([7, 3])
     
-    # Session state for managing app state
-    if 'image' not in st.session_state:
-        st.session_state.image = None
-        st.session_state.original_file_name = None
-        st.session_state.results = None
-        st.session_state.nuclei_mask = None
-        st.session_state.foci = None
-    
-    # Left column for image display
-    with col1:
-        # Image display area
-        if st.session_state.image is not None:
-            # Check if we have visualization results
-            if st.session_state.results is not None and st.session_state.nuclei_mask is not None and st.session_state.foci is not None:
-                # Create visualization with detection results
-                visualization = create_visualization(
-                    st.session_state.image,
-                    st.session_state.foci,
-                    st.session_state.nuclei_mask
-                )
-                st.image(visualization, caption="Analysis Results", use_container_width=True)
-            else:
-                # Show original image
-                st.image(st.session_state.image, caption=st.session_state.original_file_name, use_container_width=True)
-        else:
-            # Placeholder when no image is loaded
-            st.info("Please upload an image to begin")
-    
-    # Right column for controls and results
+    # Right column for controls
     with col2:
         # File uploader
         uploaded_file = st.file_uploader("Upload Image", type=['tif', 'tiff', 'png', 'jpg', 'jpeg'])
         
+        # Parameter settings
+        st.subheader("Channel Selection")
+        nucleus_channel = st.selectbox(
+            "Nucleus Channel:",
+            options=["red", "green", "blue"],
+            index=2  # Default to blue
+        )
+        
+        st.subheader("Detection Settings")
+        detection_threshold = st.slider(
+            "Foci Detection Sensitivity:",
+            min_value=0.01,
+            max_value=0.5,
+            value=0.1,
+            step=0.01,
+            format="%.2f"
+        )
+        
+        # Analysis button
+        analyze_button = st.button("Count Foci")
+        
+        # Results section
+        if st.session_state.results is not None:
+            st.subheader("Results")
+            results = st.session_state.results
+            
+            # Display metrics
+            col1_m, col2_m = st.columns(2)
+            with col1_m:
+                st.metric("Number of Nuclei", results['num_nuclei'])
+                st.metric("Total Foci", results['total_foci'])
+            with col2_m:
+                st.metric("Avg Foci per Nucleus", f"{results['avg_foci']:.2f}")
+            
+            # Export results
+            st.subheader("Export")
+            
+            # Create DataFrame
+            data = []
+            for nucleus in results['nuclei_data']:
+                data.append({
+                    'Nucleus ID': nucleus['nucleus_id'],
+                    'Nucleus Area': nucleus['area'],
+                    'Foci Count': nucleus['foci_count']
+                })
+            
+            # Add summary row
+            data.append({
+                'Nucleus ID': 'TOTAL',
+                'Nucleus Area': '',
+                'Foci Count': results['total_foci']
+            })
+            
+            data.append({
+                'Nucleus ID': 'AVERAGE',
+                'Nucleus Area': '',
+                'Foci Count': f"{results['avg_foci']:.2f}"
+            })
+            
+            # Create DataFrame
+            df = pd.DataFrame(data)
+            
+            # Display download link
+            st.markdown(get_csv_download_link(df), unsafe_allow_html=True)
+    
+    # Left column for image display
+    with col1:
+        # Process file if uploaded
         if uploaded_file is not None:
-            # Read the image when a file is uploaded
             try:
-                # Get file details
-                file_details = {"FileName": uploaded_file.name, "FileType": uploaded_file.type}
-                st.session_state.original_file_name = uploaded_file.name
-                
-                # Read the image using scikit-image
+                # Read image
                 bytes_data = uploaded_file.getvalue()
+                
+                # Create a temporary file to save the uploaded image
                 temp_file = tempfile.NamedTemporaryFile(delete=False, suffix=f".{uploaded_file.name.split('.')[-1]}")
                 temp_file.write(bytes_data)
                 temp_file.close()
                 
+                # Load image with scikit-image
                 image = io.imread(temp_file.name)
                 
                 # Handle different image formats
@@ -364,54 +405,10 @@ def main():
                             expanded[:, :, i] = image[:, :, channels-1]  # Duplicate last channel
                         image = expanded
                 
-                # Store image in session state
-                st.session_state.image = image
-                st.session_state.image_path = temp_file.name
-                st.session_state.results = None
-                st.session_state.nuclei_mask = None
-                st.session_state.foci = None
-                
-                # Add debug information
-                st.write(f"Debug - Image loaded: shape={image.shape}, type={image.dtype}")
-                
-                # Force a rerun to update the image display
-                st.rerun()
-                
-            except Exception as e:
-                st.error(f"Failed to load image: {str(e)}")
-                import traceback
-                traceback.print_exc()
-        
-        # Channel selection
-        st.subheader("Channel Selection")
-        nucleus_channel = st.selectbox(
-            "Nucleus Channel:",
-            options=["red", "green", "blue"],
-            index=2  # Default to blue
-        )
-        
-        # Detection settings
-        st.subheader("Detection Settings")
-        detection_threshold = st.slider(
-            "Foci Detection Sensitivity:",
-            min_value=0.01,
-            max_value=0.5,
-            value=0.1,
-            step=0.01,
-            format="%.2f"
-        )
-        
-        # Analysis button
-        clicked = st.button("Count Foci", key="analyze")
-        st.write(f"Debug - Button clicked: {clicked}")
-        
-        if clicked:
-            st.write("Debug - Button handler executing")
-            if st.session_state.image is not None:
-                st.write(f"Debug - Image exists: {st.session_state.image.shape}")
-                with st.spinner("Running analysis..."):
-                    try:
-                        # Use default parameters that work well for most images
+                # Run analysis when button is clicked
+                if analyze_button:
+                    with st.spinner("Analyzing image..."):
+                        # Set parameters
                         params = {
                             'threshold': 0,  # Auto threshold with Otsu
                             'min_size': 500,
@@ -421,18 +418,15 @@ def main():
                             'detection_threshold': detection_threshold
                         }
                         
-                        # Get selected nucleus channel data
+                        # Get nucleus channel data
                         if nucleus_channel == "red":
-                            nucleus_channel_data = st.session_state.image[:, :, 0]
+                            nucleus_channel_data = image[:, :, 0]
                         elif nucleus_channel == "green":
-                            nucleus_channel_data = st.session_state.image[:, :, 1]
+                            nucleus_channel_data = image[:, :, 1]
                         else:  # Default to blue
-                            nucleus_channel_data = st.session_state.image[:, :, 2]
+                            nucleus_channel_data = image[:, :, 2]
                         
-                        # Run nucleus segmentation
-                        progress_text = st.empty()
-                        progress_text.text("Segmenting nuclei...")
-                        
+                        # Segment nuclei
                         nuclei_mask = segment_nuclei(
                             nucleus_channel_data,
                             params['threshold'],
@@ -442,122 +436,74 @@ def main():
                         
                         if nuclei_mask is None:
                             st.error("Failed to segment nuclei")
-                            return
-                        
-                        # Count nuclei
-                        num_nuclei = len(np.unique(nuclei_mask)) - 1  # Subtract 1 for background
-                        if num_nuclei == 0:
-                            st.error("No nuclei detected")
-                            return
-                        
-                        # Detect foci
-                        progress_text.text("Detecting foci...")
-                        green_channel = st.session_state.image[:, :, 1]  # Green channel
-                        foci = detect_foci(
-                            st.session_state.image,
-                            green_channel,
-                            params['min_sigma'],
-                            params['max_sigma'],
-                            params['detection_threshold'],
-                            st.session_state.image_path
-                        )
-                        
-                        if foci is None or len(foci) == 0:
-                            st.error("No foci detected")
-                            return
-                        
-                        # Assign foci to nuclei
-                        progress_text.text("Counting foci per nucleus...")
-                        nuclei_data = assign_foci_to_nuclei(nuclei_mask, foci, green_channel)
-                        if nuclei_data is None:
-                            st.error("Failed to assign foci to nuclei")
-                            return
-                        
-                        # Calculate average foci per nucleus
-                        total_foci = sum(n['foci_count'] for n in nuclei_data)
-                        avg_foci = total_foci / num_nuclei
-                        
-                        # Store results in session state
-                        st.session_state.results = {
-                            'nuclei_data': nuclei_data,
-                            'num_nuclei': num_nuclei,
-                            'total_foci': total_foci,
-                            'avg_foci': avg_foci
-                        }
-                        st.session_state.nuclei_mask = nuclei_mask
-                        st.session_state.foci = foci
-                        
-                        # Clear progress text
-                        progress_text.empty()
-                        
-                        # Display results directly without rerun
-                        st.success("Analysis complete!")
-                        
-                        # Create and display visualization
-                        visualization = create_visualization(
-                            st.session_state.image,
-                            foci,
-                            nuclei_mask
-                        )
-                        st.image(visualization, caption="Analysis Results", use_container_width=True)
-                        
-                        # Show metrics
-                        col1_results, col2_results = st.columns(2)
-                        with col1_results:
-                            st.metric("Number of Nuclei", num_nuclei)
-                            st.metric("Total Foci", total_foci)
-                        with col2_results:
-                            st.metric("Avg Foci per Nucleus", f"{avg_foci:.2f}")
-                        
-                    except Exception as e:
-                        st.error(f"Analysis error: {str(e)}")
-                        import traceback
-                        traceback.print_exc()
-        
-        # Results display
-        if st.session_state.results is not None:
-            st.subheader("Results")
-            
-            # Display metrics
-            col1_m, col2_m = st.columns(2)
-            
-            with col1_m:
-                st.metric("Number of Nuclei", st.session_state.results['num_nuclei'])
-                st.metric("Total Foci", st.session_state.results['total_foci'])
-            
-            with col2_m:
-                st.metric("Avg Foci per Nucleus", f"{st.session_state.results['avg_foci']:.2f}")
-            
-            # Export results
-            st.subheader("Export")
-            
-            # Create DataFrame
-            data = []
-            for nucleus in st.session_state.results['nuclei_data']:
-                data.append({
-                    'Nucleus ID': nucleus['nucleus_id'],
-                    'Nucleus Area': nucleus['area'],
-                    'Foci Count': nucleus['foci_count']
-                })
-            
-            # Add summary row
-            data.append({
-                'Nucleus ID': 'TOTAL',
-                'Nucleus Area': '',
-                'Foci Count': st.session_state.results['total_foci']
-            })
-            
-            data.append({
-                'Nucleus ID': 'AVERAGE',
-                'Nucleus Area': '',
-                'Foci Count': f"{st.session_state.results['avg_foci']:.2f}"
-            })
-            
-            # Create DataFrame
-            df = pd.DataFrame(data)
-            
-            # Display download link
-            st.markdown(get_csv_download_link(df), unsafe_allow_html=True)
+                        else:
+                            # Count nuclei
+                            num_nuclei = len(np.unique(nuclei_mask)) - 1  # Subtract 1 for background
+                            if num_nuclei == 0:
+                                st.error("No nuclei detected")
+                            else:
+                                # Detect foci
+                                green_channel = image[:, :, 1]  # Green channel
+                                foci = detect_foci(
+                                    image,
+                                    green_channel,
+                                    params['min_sigma'],
+                                    params['max_sigma'],
+                                    params['detection_threshold'],
+                                    temp_file.name
+                                )
+                                
+                                if foci is None or len(foci) == 0:
+                                    st.error("No foci detected")
+                                else:
+                                    # Assign foci to nuclei
+                                    nuclei_data = assign_foci_to_nuclei(
+                                        nuclei_mask, 
+                                        foci, 
+                                        green_channel
+                                    )
+                                    
+                                    if nuclei_data is None:
+                                        st.error("Failed to assign foci to nuclei")
+                                    else:
+                                        # Calculate average foci per nucleus
+                                        total_foci = sum(n['foci_count'] for n in nuclei_data)
+                                        avg_foci = total_foci / num_nuclei
+                                        
+                                        # Store results
+                                        st.session_state.results = {
+                                            'nuclei_data': nuclei_data,
+                                            'num_nuclei': num_nuclei,
+                                            'total_foci': total_foci,
+                                            'avg_foci': avg_foci,
+                                            'visualization': create_visualization(image, foci, nuclei_mask)
+                                        }
+                                        
+                                        st.success("Analysis complete!")
+                
+                # Display image
+                if st.session_state.results is not None and 'visualization' in st.session_state.results:
+                    # Show visualization with detected objects
+                    st.image(
+                        st.session_state.results['visualization'], 
+                        caption=f"Analysis Results - {uploaded_file.name}",
+                        use_container_width=True
+                    )
+                else:
+                    # Show original image
+                    st.image(
+                        image, 
+                        caption=f"Original Image - {uploaded_file.name}",
+                        use_container_width=True
+                    )
+                    
+            except Exception as e:
+                st.error(f"Error processing image: {str(e)}")
+                import traceback
+                traceback.print_exc()
+        else:
+            # Placeholder text when no image is uploaded
+            st.info("Please upload an image to begin analysis")
     
     # Footer
     st.markdown("""
